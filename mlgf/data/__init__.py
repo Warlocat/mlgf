@@ -38,4 +38,5 @@ Example::
 from ._dataset import Dataset
 from ._data import Data
 from ._data_gwpt import Data_gwpt
+from ._dataset_gwpt import Dataset_gwpt
 __all__ = ['Dataset', 'Data', 'Data_gwpt']

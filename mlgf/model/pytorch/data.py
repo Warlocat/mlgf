@@ -62,7 +62,7 @@ class GraphDataset(torchDataset):
         pass
 
     def load_in_memory(self):
-        return [torch.load(os.path.join(self.raw_dir, f'data_{idx}.pt'))  for idx in range(self.len())]
+        return [torch.load(os.path.join(self.raw_dir, f'data_{idx}.pt'), weights_only=False)  for idx in range(self.len())]
     
     def get(self, idx):
         """ - Equivalent to __getitem__ in pytorch
@@ -72,7 +72,8 @@ class GraphDataset(torchDataset):
             return self.data[idx]
         else:
             return torch.load(os.path.join(self.raw_dir, 
-                                 f'data_{self.indices_[idx]}.pt'))   
+                                 f'data_{self.indices_[idx]}.pt'),
+                                 weights_only=False)   
 
 class Graph(torchData):
     """A DFT graph object

@@ -12,6 +12,8 @@ from mlgf.model.pytorch.pt_alias import get_model_from_alias
 from mlgf.model.pytorch.train import train_graph_model, train_refine_graph_model
 from mlgf.model.active_learning import get_homo_lumo_uncertainties_train_examples
 
+from mlgf.model.prepare_gnn_data_gwpt import GraphOrchestrator, GraphOrchestrator_gwpt
+
 from mpi4py import MPI
 rank = MPI.COMM_WORLD.Get_rank()
 size = MPI.COMM_WORLD.Get_size()

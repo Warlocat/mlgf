@@ -486,8 +486,8 @@ def get_hyb_off(fock_saiao, g0_saiao, omega, mask = None):
     offdiag = g0_saiao[iu]
     diag1 = g0_saiao[iu[0], iu[0], :]
     diag2 = g0_saiao[iu[1], iu[1], :]
-    hyb_off_saiao = np.zeros((n_ij, nomega), dtype=np.complex_)
-    stacks = np.zeros((n_ij, nomega, 2, 2), dtype=np.complex_)
+    hyb_off_saiao = np.zeros((n_ij, nomega), dtype=np.complex128)
+    stacks = np.zeros((n_ij, nomega, 2, 2), dtype=np.complex128)
 
     omega_minus_fock =  - np.tile(fock_saiao[iu], (len(omega),1)).T 
     
@@ -615,7 +615,7 @@ def get_sigma_from_ml(sigma_ii, sigma_ij):
     """    
     nomega = sigma_ii.shape[-1]//2 
     norbs = sigma_ii.shape[0]
-    sigma_ml_saiao = np.zeros((norbs, norbs, nomega), dtype=np.complex_)
+    sigma_ml_saiao = np.zeros((norbs, norbs, nomega), dtype=np.complex128)
     iu, il = np.triu_indices(norbs, 1), np.tril_indices(norbs, -1)
     for iw in range(nomega):     
         sigma_ml_saiao_iw = np.diag(sigma_ii[:,iw] + 1j*sigma_ii[:,nomega+iw])

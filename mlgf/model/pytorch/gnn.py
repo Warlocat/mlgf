@@ -280,7 +280,7 @@ class GNN(TorchBase):
 
         self.node_nstatic = kwargs.get('nstatic_ii', 6)
         self.node_ndynamical = kwargs.get('ndynamical_ii', 24)
-        self.ncat_ii = kwargs.get('ncat_ii', 3)
+        self.ncat_ii = kwargs.get('ncat_ii', 1)
         self.edge_nstatic = kwargs.get('nstatic_ij', 6)
         self.edge_ndynamical = kwargs.get('ndynamical_ij', 24)
 

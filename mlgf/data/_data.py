@@ -282,7 +282,7 @@ class Data:
         gf_dyn, hyb_dyn = get_custom_freq_gfhf_features(
             self.mo_energy, self[f'fock_{self.basis}'], self[f'C_{self.basis}_mo'], dyn_imag_freq_points, mlf_chkfile = getattr(self, 'fname', ''))
         setattr(self, f'gf_dyn{ftr_suffix}', gf_dyn)
-        setattr(self, f'hyb_dyn{ftr_suffix}', hyb_dyn)
+        setattr(self, f'hyb_dyn{ftr_suffix}', hyb_dyn)        
 
         hyb_dyn_off = get_hyb_off(self[f'fock_{self.basis}'], gf_dyn, dyn_imag_freq_points)
         setattr(self, f'hyb_dyn_off{ftr_suffix}', hyb_dyn_off)

@@ -15,20 +15,13 @@ from mlgf.model.pytorch.data import GraphDataset, Graph, unravel_rank2
 from mlgf.model.preprocessing import LogAugmenter, batched_update_standardscaler
 from mlgf.model.pytorch.helpers import one_hot_encode_category, predict_wrapper_graph_ensemble, get_graph_ensemble_mean, get_graph_ensemble_uncertainty
 
-"""
-GraphOrchestrator is the central object for training MBGF-Net and predicting with it
-a wrapper for predicting the self energy with GNN ensembles
-parameters are stored in model_ii_states or model_ij_states as lists of OrderedDictionaries
-for GNN ensemble of n networks, the self-energy can be predicted in predict_full_sigma() method by taking the mean of n predictions
-for GNN ensemble of n networks, the self-energy uncertainty can be estimated in uncertainty_full_sigma() method by taking a sample standard error of the mean with n-1 degrees of freedom
-"""
 
-class GraphOrchestrator:
+class GraphOrchestratorFourier:
 
     def __init__(self, feature_list_ii, feature_list_ij, target, torch_data_root, in_memory_data = True,
         cat_feature_list_ii = [], cat_feature_list_ij = [],
         ncat_ii_list = [], ncat_ij_list = [], 
-        transformer_xii = None, scale_y = None, transformer_xij = None,
+        transformer = None,
         exclude_core = False, basis = 'saiao',
         ensemble_n = 1, frontier_mo = [0, 0], model_alias = 'GNN', model_kwargs = {}, loss_kwargs = {}, 
         edge_cutoff = None, edge_cutoff_features = None, core_projection_file_path = None):
@@ -36,7 +29,6 @@ class GraphOrchestrator:
         self.loss_kwargs = loss_kwargs
         self.torch_data_root = torch_data_root
         
-        default_transformer_xii, default_transformer_xij = StandardScaler(), StandardScaler()
         self.edge_cutoff = edge_cutoff
         self.edge_cutoff_features = edge_cutoff_features
         self.core_projection_file_path = core_projection_file_path
@@ -68,16 +60,7 @@ class GraphOrchestrator:
 
         self.exclude_core = exclude_core # only relevant for training purposes, not prediction
         self.basis = basis
-
-        if transformer_xii is None: 
-            self.transformer_xii = default_transformer_xii
-        else:
-            self.transformer_xii = transformer_xii
-
-        if transformer_xij is None: 
-            self.transformer_xij = default_transformer_xij
-        else:
-            self.transformer_xij = transformer_xij
+        self.transformer = transformer
 
         self.dyn_imag_freq_points = []
         self.ensemble_n = ensemble_n
@@ -100,6 +83,7 @@ class GraphOrchestrator:
         """        
         for i, ftr in enumerate(self.cat_feature_list_ii):
             xc = moldatum.get_diag_features([ftr], exclude_core = exclude_core)
+
             if i == 0:
                 xc_tot = xc
             else:
@@ -129,15 +113,14 @@ class GraphOrchestrator:
         
         return tensor.double()
     
-    def moldatum_to_graph(self, moldatum, features_ii, features_ij, transformer_ii, transformer_ij, concat_1hot = True, extras = True):
+    def moldatum_to_graph(self, moldatum, features_ii, features_ij, transformer = None, concat_1hot = True, extras = True):
         """Important function for creating the DFT graphs from moldatum objects
 
         Args:
             moldatum (Data)
             features_ii (list of string): feautres on nodes
             features_ij (list of string): features on edges
-            transformer_ii (sklearn-like scaler object): transformer for nodes
-            transformer_ij (sklearn-like scaler object): transformer for edges
+            transformer (custom scaler object): transformer for nodes and edges
             concat_1hot (bool, optional): concatenate binary features. Defaults to True.
             extras (bool, optional): add graph-level info as attributes (e.g. C_saiao_mo rotation, nmo, nocc). Defaults to True.
 
@@ -168,7 +151,7 @@ class GraphOrchestrator:
         else:
             x = transformer_ii.transform(x)
 
-        if concat_1hot and len(self.cat_feature_list_ii) != 0:
+        if concat_1hot:
             xc_1hot = one_hot_encode_category(cat_ii, self.ncat_ii_list).numpy()
             x = np.hstack((x, xc_1hot))
         
@@ -241,73 +224,6 @@ class GraphOrchestrator:
             #     graph.C_mo_lo = self.convert_precision(C_mo_lo)
 
         return graph
-
-    def load_dset(self, batcher, nstatic_ij, ndynamical_ij):
-        """batched fitting of StandardScaling of ii and ij features for large datasets
-
-        Args:
-            batcher (DataDsetBatcher): _description_
-            nstatic_ij (int): number of ij static features
-            ndynamical_ij (int): number of ij dyn features
-
-        Returns:
-            self
-        """       
-       
-        self.train_files = batcher.fnames
-        self.mol_batcher = batcher
-        if batcher.dynamical_ftr_freqs is None:
-            batcher.dynamical_ftr_freqs = 1j*np.array([1e-3, 0.1, 0.2, 0.5, 1.0, 2.0])
-        self.dynamical_ftr_freqs = batcher.dynamical_ftr_freqs
-         
-        for i in range(len(self.mol_batcher)):
-
-            dset = self.mol_batcher[i]
-            xii = dset.get_diag_features(self.feature_list_ii, exclude_core = self.exclude_core)
-            xij = dset.get_offdiag_features(self.feature_list_ij, exclude_core = self.exclude_core)
-
-            if not self.edge_cutoff_features is None and not self.edge_cutoff is None:
-                screen_features = dset.get_offdiag_features(self.edge_cutoff_features, exclude_core = self.exclude_core)
-                toremove = np.max(np.abs(screen_features), axis = 1) < self.edge_cutoff
-                xij = xij[~toremove,:]
-
-            if i == 0:
-                self.transformer_xii = StandardScaler()
-                self.transformer_xij =  LogAugmenter(nstatic_ij, ndynamical_ij)
-                # self.transformer_xij =  StandardScaler()
-
-                self.transformer_xii.fit(xii)
-                self.transformer_xij.fit(xij)
-
-            else:
-                new_transformer_ii = StandardScaler()
-                new_transformer_ii.fit(xii)
-                self.transformer_xii = batched_update_standardscaler(new_transformer_ii, self.transformer_xii)
-                new_transformer_ij = LogAugmenter(nstatic_ij, ndynamical_ij)
-                new_transformer_ij.fit(xij)
-                self.transformer_xij = LogAugmenter.from_two_augmenters(new_transformer_ij, self.transformer_xij)
-        
-        if os.path.exists(self.torch_data_root):
-            shutil.rmtree(self.torch_data_root)
-            
-        os.makedirs(f'{self.torch_data_root}/raw')
-
-        self.precision = self.model_kwargs.get('precision', 'double')
-        
-        k = 0
-        for i in range(len(self.mol_batcher)):
-            dset = self.mol_batcher[i]
-            for j, mol in enumerate(dset):
-                gx = self.moldatum_to_graph(mol, self.feature_list_ii, self.feature_list_ij, self.transformer_xii, self.transformer_xij, concat_1hot = True)
-                gy = self.moldatum_to_graph(mol, [self.target], [self.target], 1.0, 1.0, concat_1hot = False, extras = False)
-                gx.sigma_ii = gy.x
-                gx.sigma_ij = gy.edge_attr
-                torch.save(gx, f'{self.torch_data_root}/raw/data_{k}.pt')
-                k += 1
-
-        self.data = GraphDataset(f'{self.torch_data_root}', in_memory = self.in_memory_data)
-        self.data_baseline = []
-        return self
 
     def fit_transformers_mpi(self, batcher, nstatic_ij, ndynamical_ij, rank, size, comm):
         """MPI batched fitting of StandardScaling of ii and ij features for large datasets

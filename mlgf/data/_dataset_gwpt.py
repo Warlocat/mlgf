@@ -4,11 +4,13 @@ import os, warnings
     
 
 class Dataset_gwpt(Dataset):    
-    def __init__(self, iterable, loaded = {}, data_format = 'chk', preserve_order=True, load_data = True, purge_keys = [], core_projection_file_path = None, basis = 'saiao'):
+    def __init__(self, iterable, ref_iterable, loaded = {}, data_format = 'chk', preserve_order=True, load_data = True, purge_keys = [], core_projection_file_path = None, basis = 'saiao'):
         if preserve_order:
             self.fnames = list(iterable)
+            self.ref_files = list(ref_iterable)
         else:
             self.fnames = sort_fnames_by_number(iterable)
+            self.ref_files = sort_fnames_by_number(ref_iterable)
         self.conf_nums = list(get_conf_nums(self.fnames))
         self.conf_nums_to_fnames = dict(zip(self.conf_nums, self.fnames))
         self.purge_keys = purge_keys
@@ -31,29 +33,27 @@ class Dataset_gwpt(Dataset):
         else:
             self.val_core_dats = None
 
-    def get_by_fname(self, fname):
+    def get_by_fname(self, fname, refname = None):
+        assert self.data_format == 'chk'
         if fname in self.loaded:
             return self.loaded[fname]
         else:
-            if self.data_format == 'joblib':
-                raise NotImplementedError('joblib format not implemented for GWPT data')
-            elif self.data_format == 'chk':
-                dat = Data_gwpt.load_chk(fname, purge_keys = self.purge_keys, val_core_dats = self.val_core_dats, basis = self.basis)
-            elif self.data_format == 'internal':
-                raise NotImplementedError('internal format not implemented for GWPT data')
-            else:
-                raise ValueError(f'Unknown data format {self.data_format}; acceptable values are {Dataset._format_extension_tbl.keys()}')
+            assert not refname is None
+            dat = Data_gwpt.load_chk(fname, refname, purge_keys = self.purge_keys, val_core_dats = self.val_core_dats, basis = self.basis)
             if self.load_data:
                 self.loaded[fname] = dat
-            return dat
+        return dat
         
     def __getitem__(self, idx):
         fname = self.fnames[idx]
-        return self.get_by_fname(fname)
+        refname = self.ref_files[idx]
+        return self.get_by_fname(fname, refname)
     
     @staticmethod
-    def from_files(file_list, dropout_files = [], data_format = 'chk', load_data = True, purge_keys = [], core_projection_file_path = None, basis = 'saiao'):
-        return Dataset_gwpt([filename for filename in file_list if filename not in dropout_files], data_format=data_format, load_data = load_data, purge_keys = purge_keys, core_projection_file_path = core_projection_file_path, basis = basis)
+    def from_files(file_list, ref_file_list, dropout_files = [], data_format = 'chk', load_data = True, purge_keys = [], core_projection_file_path = None, basis = 'saiao'):
+        return Dataset_gwpt([filename for filename in file_list if filename not in dropout_files], 
+                            [filename for filename in ref_file_list if filename not in dropout_files],
+                            data_format=data_format, load_data = load_data, purge_keys = purge_keys, core_projection_file_path = core_projection_file_path, basis = basis)
             
     @staticmethod
     def from_srcdirectory(src, dropout_files = [], data_format = 'chk'):
@@ -77,3 +77,4 @@ class Dataset_gwpt(Dataset):
                 loaded = {fname: self.loaded[fname] for fname in fnames if fname in self.loaded},
                 data_format=self.data_format, load_data = load_data
         )
+

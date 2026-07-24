@@ -196,6 +196,7 @@ def get_saiao_features(mol, mlf, C_ao_saiao, categorical = True):
     dm_saiao = np.linalg.multi_dot((C_ao_saiao.T, S_ao, dm, S_ao, C_ao_saiao))
     abs_diff_particle_number = abs(np.trace(dm_saiao)-nelectron)
     if abs_diff_particle_number > 1e-8:
+        print("here!")
         warnings.warn(f'dm_saiao particle number diff {abs_diff_particle_number:0.6e}')
 
     # feature 2 : Fock matrix
@@ -250,6 +251,98 @@ def get_saiao_features(mol, mlf, C_ao_saiao, categorical = True):
     if categorical:
         mlf['cat_orbtype_principal'], mlf['cat_orbtype_angular'] = get_orbtypes(mol)
         mlf['cat_orbtype_saiao'] = get_orb_type(mol, dm_saiao)
+    return mlf
+
+def get_saiao_features_with_mol_ref(mol_ref, mlf, C_ao_saiao, categorical = True):
+    """get ML features in SAIAO basis
+
+    Args:
+        mol : pyscf mol object
+        custom_chkfile (string): mlgf chkfile object from generate.py
+        C_ao_saao (np.float64, norb x norb): rotation matrix from AO to SAIAO
+        categorical (boolean): whether to generate integer valued features for quantum numbers and orbital type
+
+    Returns:
+        dict: modified mlf dictionary with SAIAO basis features
+    """    
+
+
+    basis_name = 'saiao'
+    mlf['C_ao_saiao'] = C_ao_saiao
+
+    mo_energy = mlf['mo_energy_ref']
+    mo_coeff = mlf['mo_coeff_ref']
+    S_ao = mlf['ovlp_ref']
+    nocc = mlf['nocc']
+    dm = mlf['dm_hf_ref']
+    nelectron = nocc*2
+            
+    # feature 1: density matrix
+    dm_saiao = C_ao_saiao.T @ S_ao @ dm @ S_ao @ C_ao_saiao
+    abs_diff_particle_number = abs(np.trace(dm_saiao)-nelectron)
+    if abs_diff_particle_number > 1e-8:
+        print("there!")
+        warnings.warn(f'dm_saiao particle number diff {abs_diff_particle_number:0.6e}')
+
+    # feature 2 : Fock matrix
+    fock = mlf['fock_ref']
+    fock = mlf['fock_ref']
+    fock_saiao = C_ao_saiao.T @ fock @ C_ao_saiao
+
+    # feature 3 : hcore matrix
+    hcore = mlf['hcore_ref']
+    hcore_saiao = C_ao_saiao.T @ hcore @ C_ao_saiao
+
+    # feature 4 & 5 : J and K matrices
+    vj, vk = mlf['vj_ref'], mlf['vk_ref']
+    vj_saiao = C_ao_saiao.T @ vj @ C_ao_saiao
+    vk_saiao = C_ao_saiao.T @ vk @ C_ao_saiao
+
+    # feature 6 : mean-field GF (imag freq)
+    # GF in MO basis on (ef + iw_n)
+    ef = (mo_energy[nocc-1] + mo_energy[nocc]) / 2
+
+    # GF in SAIAO basis
+    C_saiao_mo = C_ao_saiao.T @ S_ao @ mo_coeff
+    C_mo_saiao = C_saiao_mo.T
+
+    if "omega_fit" in mlf.keys():
+        selected_freqs = mlf['omega_fit'] #ALREADY IMAG
+        full_sigma = mlf['sigmaI_ref'] # full sigma (>> len(omegaI))
+        full_freqs = mlf['freqs']
+
+        sigma_fit = get_sigma_fit(full_sigma, full_freqs, selected_freqs)
+        sigma_saiao = gGW_mo_saiao(sigma_fit, C_mo_saiao)
+        mlf[f'sigma_{basis_name}'] = sigma_saiao
+
+        full_sigma = mlf['sigmaI_ref_diff'] # full sigma (>> len(omegaI))
+        full_freqs = mlf['freqs']
+        sigma_fit = get_sigma_fit(full_sigma, full_freqs, selected_freqs)
+        sigma_saiao = gGW_mo_saiao(sigma_fit, C_mo_saiao)
+        mlf[f'sigma_{basis_name}_diff'] = sigma_saiao
+
+    # mlf = {}
+    mlf[f'dm_{basis_name}'] = dm_saiao
+    mlf[f'fock_{basis_name}'] = fock_saiao
+    mlf[f'hcore_{basis_name}'] = hcore_saiao
+    mlf[f'vj_{basis_name}'] = vj_saiao
+    mlf[f'vk_{basis_name}'] = vk_saiao
+    mlf[f'C_{basis_name}_mo'] = C_saiao_mo
+
+    mlf[f'hcore+vj_{basis_name}'] = hcore_saiao + vj_saiao
+
+    if 'vxc_ref' in mlf.keys():
+        vxc_saiao = C_ao_saiao.T @ mlf['vxc_ref'] @ C_ao_saiao
+        mlf[f'vxc_{basis_name}'] = vxc_saiao
+
+    if categorical:
+        mlf['cat_orbtype_principal'], mlf['cat_orbtype_angular'] = get_orbtypes(mol_ref)
+        mlf['cat_orbtype_saiao'] = get_orb_type(mol_ref, dm_saiao)
+
+    df_mol = get_orbtypes_df(mol_ref)
+    mlf['atomic_charge_saiao'] = get_saiao_charges(df_mol, mlf['dm_saiao'])
+    mlf['boys_saiao'] = get_saiao_locality(mol_ref, mlf['C_ao_saiao'])
+
     return mlf
 
 def get_sigma_ml(mlf_chkfile, pickle_file):
@@ -542,7 +635,8 @@ def get_chk_saiao(mf, fock_ao, minao = 'minao', force_eigv_direction = False, va
     fock_iao = reduce(np.dot, (C_ao_iao.T, fock_ao, C_ao_iao))
     C_iao_saiao = get_saao(mf.mol, fock_iao, force_eigv_direction = force_eigv_direction)
     
-    assert(np.linalg.norm(np.dot(C_iao_saiao.T, C_iao_saiao)-np.eye(fock_iao.shape[0]))<1e-8)
+    orthonormal = np.linalg.norm(np.dot(C_iao_saiao.T, C_iao_saiao)-np.eye(fock_iao.shape[0]))
+    assert orthonormal < 1e-8, f'saiao is not orthonormal, check {orthonormal}'
     return C_ao_iao, C_iao_saiao, fock_iao
 
 def get_chk_saao(mol, fock):  

@@ -14,7 +14,7 @@ rank = MPI.COMM_WORLD.Get_rank()
 size = MPI.COMM_WORLD.Get_size()
 comm = MPI.COMM_WORLD
 
-def check_integrity(mlf_chkfile, trace_thresh = 1e-8):
+def check_integrity(mlf_chkfile, mlf_chkfile_ref, trace_thresh = 1e-8):
     """some data integrity checks to check the validity of saved electronic structure data
 
     Args:
@@ -27,7 +27,7 @@ def check_integrity(mlf_chkfile, trace_thresh = 1e-8):
     """    
     file_return = None
     try:
-        mlf = Data_gwpt.load_chk(mlf_chkfile)
+        mlf = Data_gwpt.load_chk(mlf_chkfile, mlf_chkfile_ref)
         dm_saiao = mlf['dm_saiao']
 
         mo_occ = mlf['mo_occ']
@@ -62,21 +62,45 @@ def check_integrity(mlf_chkfile, trace_thresh = 1e-8):
     return file_return
 
 class GraphOrchestrator_gwpt(GraphOrchestrator):
-    def mount_predict_dset(self, mlf_chkfile):  
+    def mount_predict_dset(self, mlf_chkfile, ref_chkfile):
         """prepare DFT features for prediction
 
         Args:
             mlf_chkfile (str): chkfile with DFT calculation
         """        
         file_list = [mlf_chkfile]
-        self.pdset = Dataset_gwpt.from_files(file_list, data_format='chk', core_projection_file_path = getattr(self, 'core_projection_file_path', None), basis = self.basis)
-        self.pdset.prep_dyn_features(self.dynamical_ftr_freqs, ftr_suffix = '' , add_ef = True)    
+        ref_list = [ref_chkfile]
+        self.pdset = Dataset_gwpt.from_files(file_list, ref_list, data_format='chk', core_projection_file_path = getattr(self, 'core_projection_file_path', None), basis = self.basis)
+        self.pdset.prep_dyn_features(self.dynamical_ftr_freqs, ftr_suffix = '' , add_ef = True)
+
+    def predict_full_sigma(self, mlf_chkfile, ref_chkfile, remount_mlf_chkfile = True, exclude_core = False): # 
+        """self-energy prediction
+
+        Args:
+            mlf_chkfile (string): chkfile with DFT calculation to compute self-energy from
+            ref_chkfile (string): reference chkfile for the same system
+            remount_mlf_chkfile (bool, optional): remount chkfile into the pgraph stored in the object. Defaults to True.
+        Returns:
+            np.complex64: predicted self-energy tensor in SAIAO basis (nmo x nmo x nomega)
+        """
+        from mlgf.model.pytorch.helpers import one_hot_encode_category, predict_wrapper_graph_ensemble, get_graph_ensemble_mean, get_graph_ensemble_uncertainty
+        if remount_mlf_chkfile:
+            self.mount_predict_dset(mlf_chkfile, ref_chkfile) #
+        self.pgraph = self.moldatum_to_graph(self.pdset[0], self.feature_list_ii, self.feature_list_ij, self.transformer_xii, self.transformer_xij, concat_1hot = True)
+
+        sigmas =  predict_wrapper_graph_ensemble(self.pgraph, self.model_states, self.model_alias, **self.model_kwargs)
+        sigma = get_graph_ensemble_mean(sigmas)
+
+        nw = sigma.shape[-1]//2
+        return sigma[:, :, :nw] + 1j*sigma[:, :, nw:]
+
+    
 
 class DataBatcher:
     """controller for batching the feature preparation on MPI procs
     """    
 
-    def __init__(self, fnames, batch_size = 1, seed = 42, dynamical_ftr_freqs = None, core_projection_file_path = None, check_data_integrity = True, basis = 'saiao'):            
+    def __init__(self, fnames, ref_files, batch_size = 1, seed = 42, dynamical_ftr_freqs = None, core_projection_file_path = None, check_data_integrity = True, basis = 'saiao'):            
 
         if dynamical_ftr_freqs is None:
             self.dynamical_ftr_freqs = 1j*np.array([1e-3, 0.1, 0.2, 0.5, 1.0, 2.0])
@@ -86,12 +110,19 @@ class DataBatcher:
         self.check_data_integrity = check_data_integrity
 
         self.fnames = fnames[:]
+        self.ref_files = ref_files[:]
+        assert len(self.fnames) == len(self.ref_files), 'fnames and ref_files must be the same length'
         self.seed = seed
         if not self.seed is None:
             np.random.seed(seed)
-            self.fnames = np.random.permutation(self.fnames)
+            permutation_indices = np.random.permutation(len(self.fnames))
+            # keep the corresponding ref_files in the same order as fnames
+            self.fnames = [self.fnames[i] for i in permutation_indices]
+            self.ref_files = [self.ref_files[i] for i in permutation_indices]
+
 
         self.file_batches = [self.fnames[i:i+batch_size] for i in range(0, len(self.fnames), batch_size)]
+        self.ref_file_batches = [self.ref_files[i:i+batch_size] for i in range(0, len(self.ref_files), batch_size)]
         self.n_batches = len(self.file_batches)
         self.batch_size = batch_size
         self.dset_files = None
@@ -104,7 +135,7 @@ class DataBatcher:
     
     def __getitem__(self, idx):
         if self.dset_files is None:
-            dset = Dataset_gwpt.from_files(self.file_batches[idx], data_format='chk', load_data = True, core_projection_file_path = self.core_projection_file_path, basis = self.basis)
+            dset = Dataset_gwpt.from_files(self.file_batches[idx], self.ref_file_batches[idx], data_format='chk', load_data = True, core_projection_file_path = self.core_projection_file_path, basis = self.basis)
             dset = dset.prep_dyn_features(self.dynamical_ftr_freqs, ftr_suffix = '', add_ef = True)
             return dset
         else:
@@ -113,7 +144,7 @@ class DataBatcher:
                 return dset
             except FileNotFoundError:
                 print(f'Dset file {self.dset_files[idx]} not found! Preparing new dset from file_batches[{idx}]...')
-                dset = Dataset_gwpt.from_files(self.file_batches[idx], data_format='chk', load_data = True, core_projection_file_path = self.core_projection_file_path, basis = self.basis)
+                dset = Dataset_gwpt.from_files(self.file_batches[idx], self.ref_file_batches[idx], data_format='chk', load_data = True, core_projection_file_path = self.core_projection_file_path, basis = self.basis)
                 dset = dset.prep_dyn_features(self.dynamical_ftr_freqs, ftr_suffix = '', add_ef = True)
                 return dset
     
@@ -138,30 +169,31 @@ class DataBatcher:
             print(f'-----Checking integrity of data on rank {mpi_rank}-----')
             for idx in batch_idx_queue:
                 files = self.file_batches[idx]
-                for f in files:
-                    check_integrity(f)
+                ref_files = self.ref_file_batches[idx]
+                for i, f in enumerate(files):
+                    check_integrity(f, ref_files[i])
 
         for idx in batch_idx_queue:
-            dset = Dataset_gwpt.from_files(self.file_batches[idx], data_format='chk', load_data = True, purge_keys = dset_purge_keys, core_projection_file_path = self.core_projection_file_path, basis = self.basis)
+            dset = Dataset_gwpt.from_files(self.file_batches[idx], self.ref_file_batches[idx], data_format='chk', load_data = True, purge_keys = dset_purge_keys, core_projection_file_path = self.core_projection_file_path, basis = self.basis)
             dset = dset.prep_dyn_features(self.dynamical_ftr_freqs, ftr_suffix = '', add_ef = True)
             joblib.dump(dset, self.dset_files[idx])
     
     def get_index_global(self, batch_num, file_num):
         return self.indexer[batch_num, file_num]
 
-def load_mol_batcher(dset_store_dir, train_files, batch_size, seed = 42, dynamical_ftr_freqs = None, dset_purge_keys = [], core_projection_file_path = None, basis = 'saiao'):
-    mol_batcher =  DataBatcher(train_files, batch_size = batch_size, dynamical_ftr_freqs = dynamical_ftr_freqs, seed = seed, core_projection_file_path = core_projection_file_path, basis = basis)
+def load_mol_batcher(dset_store_dir, train_files, ref_files, batch_size, seed = 42, dynamical_ftr_freqs = None, dset_purge_keys = [], core_projection_file_path = None, basis = 'saiao'):
+    mol_batcher =  DataBatcher(train_files, ref_files, batch_size = batch_size, dynamical_ftr_freqs = dynamical_ftr_freqs, seed = seed, core_projection_file_path = core_projection_file_path, basis = basis)
     mol_batcher.to_disk(dset_store_dir, mpi_rank = rank, mpi_size = size, dset_purge_keys = dset_purge_keys)
     return mol_batcher
 
-def prepare_gnn_mpi(gnn_orch_file, train_files, dset_store_dir, torch_data_root, ensemble_n, model_alias, 
+def prepare_gnn_mpi(gnn_orch_file, train_files, ref_files, dset_store_dir, torch_data_root, ensemble_n, model_alias, 
         feat_list_ii, feat_list_ij, target, dynamical_ftr_freqs = None, exclude_core = False, edge_cutoff = None, edge_cutoff_features = None,
         dset_batch_size = 10, nstatic_ij = 6, ndynamical_ij = 24, baseline_train_files = [], cat_feat_list_ii = [], cat_feat_list_ij = [], 
         ncat_ii_list = [], ncat_ij_list = [], model_kwargs = {}, loss_kwargs = {}, frontier_mo = [0, 0]
         , in_memory_data = False, seed = 42, dset_purge_keys = [], core_projection_file_path = None, basis = 'saiao'):
     """Prepares GraphDataset and GraphOrchestrator for subsequent training of MBGF-Net
     """
-    mol_batcher = load_mol_batcher(dset_store_dir, train_files, dset_batch_size, seed = seed, dynamical_ftr_freqs = dynamical_ftr_freqs, dset_purge_keys = dset_purge_keys, core_projection_file_path = core_projection_file_path, basis = basis)
+    mol_batcher = load_mol_batcher(dset_store_dir, train_files, ref_files, dset_batch_size, seed = seed, dynamical_ftr_freqs = dynamical_ftr_freqs, dset_purge_keys = dset_purge_keys, core_projection_file_path = core_projection_file_path, basis = basis)
     comm.Barrier()
     gnn_orch = GraphOrchestrator_gwpt(feat_list_ii, feat_list_ij, target, torch_data_root, in_memory_data = in_memory_data,
     cat_feature_list_ii = cat_feat_list_ii, cat_feature_list_ij = cat_feat_list_ij, ncat_ii_list = ncat_ii_list, ncat_ij_list = ncat_ij_list,
@@ -209,6 +241,7 @@ if __name__ == '__main__':
     
     # the .chk files use for training
     train_files = job['train_files']
+    ref_files = job['ref_files']
     baseline_train_files = job.get('baseline_train_files', [])
 
     # Whether core orbitals (and associated edges) are discarded
@@ -243,7 +276,6 @@ if __name__ == '__main__':
     torch_data_root = job.get('torch_data_root', None)
     in_memory_data = job.get('in_memory_data', False)
     basis = job.get('basis', 'saiao')
-    print(basis)
     purge_keys = ['C_ao_iao', 'C_ao_saiao', 'C_iao_saiao', 'coeff', 'conf_name', 'conf_num', 'dm_gw', 'dm_hf', 
     'fock', 'fock_iao', 'freqs', 'hcore', 'mol', 'ovlp', 'sigmaI', 'success', 'vj', 'vk', 'vk_hf', 'vxc', 'wts']
     core_projection_file_path = job.get('core_projection_file_path', None)
@@ -264,7 +296,7 @@ if __name__ == '__main__':
     print('gnn_orch_file: ', gnn_orch_file)
     print('dset_store_dir: ', dset_store_dir)
     print('torch_data_root: ', torch_data_root)
-    prepare_gnn_mpi(gnn_orch_file, train_files, dset_store_dir, torch_data_root, ensemble_n, model_alias, 
+    prepare_gnn_mpi(gnn_orch_file, train_files, ref_files, dset_store_dir, torch_data_root, ensemble_n, model_alias, 
     feat_list_ii, feat_list_ij, target, dynamical_ftr_freqs = dynamical_ftr_freqs, exclude_core = exclude_core, edge_cutoff = edge_cutoff, edge_cutoff_features = edge_cutoff_features,
     dset_batch_size = dset_batch_size, seed = batcher_seed, nstatic_ij = nstatic_ij, ndynamical_ij = ndynamical_ij, baseline_train_files = baseline_train_files, 
     cat_feat_list_ii = cat_feat_list_ii, cat_feat_list_ij = cat_feat_list_ij, ncat_ii_list = ncat_ii_list, ncat_ij_list = ncat_ij_list, 
